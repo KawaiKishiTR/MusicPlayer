@@ -1,0 +1,4 @@
+PyAudio==0.2.14
+typeguard==4.4.4
+typing_extensions==4.14.1
+yt-dlp==2025.7.21
