@@ -1,74 +1,37 @@
-from dataclasses import dataclass
-from typeguard import typechecked
-from mimetypes import guess_type
-from zipfile import ZipFile
-from hashlib import sha256
-from yt_dlp import YoutubeDL
-from shutil import rmtree
-from uuid import uuid4
-from files import *
+import data_structure
+import core_api
+import zipfile
+import pathlib
+import yt_dlp
+import yt_api
+import files
+import uuid
 import json
-import os
-
-YT_AUDIO_API = {
-    'format': 'bestaudio[ext=opus]/bestaudio/best',
-    'postprocessors': [
-        {
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'opus',
-            'preferredquality': '32',
-        },
-    ],
-    'quiet': True,
-    'no_warnings': True,
-    'outtmpl': '%(title)s.%(ext)s', # dosya isim şablonu
-}
-
-YT_THUMBNAIL_API = {
-    'quiet': True,
-    'writethumbnail': True,
-    'skip_download': True,
-    'no_warnings': True,
-    'outtmpl': '%(title)s.%(ext)s',
-}
-
-YT_INFO_API = {
-    'skip_download': True,
-    'quiet': True,
-    'no_warnings': True,
-    'outtmpl': '%(title)s.%(ext)s', # dosya isim şablonu
-}
-
-@dataclass
-class YT_Video_metadata:
-    title:str
-    uploader:str
-    upload_date:str
-    track:str
-    artist:str
-
-    def __str__(self):
-        return f"{self.title}\n{self.uploader}\n{self.upload_date}\n{self.track}\n{self.artist}"
+import vlc
 
 
-class YTMusıcDownload:
-    def __init__(self, url:str):
-        self.url = url
-        self.uuid = uuid4()
-        self.tempfolder = TEMP / str(self.uuid.hex)
-        self.tempfolder.mkdir()
-        self._metadata:None | YT_Video_metadata = None
-    
-    @property
-    def metadata(self):
-        if self._metadata is not None:
-            return self._metadata
-        else:
-            return self.info
 
-    @property
-    def info(self) -> YT_Video_metadata:
-        with YoutubeDL(YT_INFO_API) as ydl:
+class YT_playlistParser(core_api.playlistParserAPI):
+    def parse(self) -> "YT_urlCollection":
+        with yt_dlp.YoutubeDL(yt_api.YT_PLAYLIST_PARSER_API) as ydl:
+            info = ydl.extract_info(self.url, download=False)
+
+            return YT_urlCollection(*[entry["url"] for entry in info["entries"]])
+
+#TODO: download metodundan Playlist çıktısı alınmalı ve veri tabanı etkileşimleri
+class YT_urlCollection(core_api.urlCollectionAPI):
+    def download(self):
+        uuids = {}
+        for url in self.urls:
+            YT = YT_urlDownload(url)
+            YT.export()
+            uuids[YT.uuid.hex] = YT.archive_path
+        json.dump(uuids, open(files.PLAYLIST / uuid.uuid4().hex, "w", encoding="utf-8"))
+
+
+class YT_urlDownload(core_api.urlDownloadAPI):
+    def get_metadata(self) -> data_structure.video_metadata:
+        with yt_dlp.YoutubeDL(yt_api.YT_INFO_API) as ydl:
             info = ydl.extract_info(self.url, download = False)
 
             metadata = {
@@ -77,80 +40,71 @@ class YTMusıcDownload:
                 "upload_date": info.get("upload_date"),
                 "track": info.get("track"),
                 "artist": info.get("artist"),
+                "url": self.url,
+                "uuid": self.uuid.hex
             }
 
-            self._metadata = YT_Video_metadata(**metadata)
+            self._metadata = data_structure.video_metadata(**metadata)
             return self._metadata
 
     def get_thumbnail(self):
-        cwd = os.getcwd()
-        os.chdir(TEMP / str(self.uuid.hex))
+        api = yt_api.YT_THUMBNAIL_API.copy()
+        api["outtmpl"] = str(self.thumbnaildir / api["outtmpl"])
 
-        with YoutubeDL(YT_THUMBNAIL_API) as ydl:
+        with yt_dlp.YoutubeDL(api) as ydl:
             ydl.download([self.url])
-
-        os.chdir(cwd)
 
     def get_audio(self):
-        cwd = os.getcwd()
-        os.chdir(TEMP / str(self.uuid.hex))
+        api = yt_api.YT_AUDIO_API.copy()
+        api["outtmpl"] = str(self.audiodir / api["outtmpl"])
 
-        with YoutubeDL(YT_AUDIO_API) as ydl:
+        with yt_dlp.YoutubeDL(api) as ydl:
             ydl.download([self.url])
 
-        os.chdir(cwd)
-            
+#TODO: bu sınıf yeniden değerlendirilmeli
 class kawaimusic:
-    @typechecked
-    def __init__(self, video_url:YTMusıcDownload|str, path:Path = MUSIC, download_audio:bool = True):
-        if isinstance(video_url, str):
-            video_url = YTMusıcDownload(video_url)
-        
-        self.video_url = video_url
-        self.download_audio = download_audio
+    def __init__(self, path:pathlib.Path):
         self.path = path
+
+        self.audio_path:str = None
+        self.thumbanil_path:str = None
     
-    def export(self, path:Path = None, download_audio:bool = None):
-        if path is None:
-            path = self.path
-        if download_audio is None:
-            download_audio = self.download_audio
-        
-        if download_audio:
-            self.video_url.get_audio()
-        self.video_url.get_thumbnail()
+    def __del__(self):
+        if self.audio_path is not None and (path:=pathlib.Path(self.audio_path)).exists():
+            path.unlink()
+        if self.thumbanil_path is not None and (path:=pathlib.Path(self.thumbanil_path)).exists():
+            path.unlink()
 
-        with ZipFile(path / (self.video_url.info.title + ".kawaimusic"), "w") as archive:
-            archive.writestr("url", self.video_url.url)
-            archive.writestr("uuid", self.video_url.uuid.hex)
-            for _type, file in [(guess_type(p)[0],p) for p in self.video_url.tempfolder.iterdir()]:
-                
-                
-                if _type.startswith("audio"):
-                    archive.write(file, arcname="audio")
+    def load_thumbnail(self):
+        if self.thumbanil_path is not None:
+            return self.thumbanil_path
+        with zipfile.ZipFile(self.path, "r") as zf:
+            with zf.open("thumbnail") as thumbnail:
+                with files.tempfile(False) as tmp:
+                    tmp.write(thumbnail.read())
+                    self.thumbanil_path = tmp.name
+        return self.thumbanil_path
+    
+    def load_audio(self):
+        if self.audio_path is not None:
+            return self.audio_path
+        with zipfile.ZipFile(self.path, "r") as zf:
+            with zf.open("audio") as audio:
+                with files.tempfile(delete=False) as tmp:
+                    tmp.write(audio.read())
+                    self.audio_path = tmp.name
+        return self.audio_path
+    
+    def load(self):
+        return [self.load_thumbnail(),
+                self.load_audio()]
 
+    def play(self):
+        self.load()
 
-                    sha = sha256()
-                    with open(file, "rb") as f:
-                        for blok in iter(lambda: f.read(4096), b""):
-                            sha.update(blok)
-                    archive.writestr("hash", sha.hexdigest())
-
-
-                elif _type.startswith("image"):
-                    archive.write(file, arcname="thumbnail")
-
-        if self.video_url.tempfolder.exists() and self.video_url.tempfolder.is_dir():
-            rmtree(self.video_url.tempfolder)
-            
-
-
-
-
+        player = vlc.MediaPlayer(self.audio_path)
+        player.play()
 
 
 
-url = "https://www.youtube.com/watch?v=kPa7bsKwL-c"  # İndirmek istediğin video linki
 
-km = kawaimusic(url)
-km.export()
