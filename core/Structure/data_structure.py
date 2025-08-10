@@ -1,7 +1,6 @@
 import dataclasses
 
 
-
 @dataclasses.dataclass
 class video_metadata:
     upload_date:str
@@ -12,9 +11,6 @@ class video_metadata:
     uuid:str
     url:str
 
-    def __str__(self):
-        return f"{self.uuid}\n{self.url}\n{self.title}\n{self.uploader}\n" \
-        f"{self.upload_date}\n{self.track}\n{self.artist}"
 
     def get_dict(self):
         return {

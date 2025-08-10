@@ -1,0 +1,549 @@
+file: Structure/data_structure.py
+import dataclasses
+
+
+@dataclasses.dataclass
+class video_metadata:
+    upload_date:str
+    uploader:str
+    artist:str
+    title:str
+    track:str
+    uuid:str
+    url:str
+
+
+    def get_dict(self):
+        return {
+            "uuid":self.uuid,
+            "url":self.url,
+            "title":self.title,
+            "uploader":self.uploader,
+            "upload_date":self.upload_date,
+            "track":self.track,
+            "artist":self.artist
+        }
+
+
+
+
+file: Structure/__init__.py
+from Structure.data_structure import video_metadata
+from Structure.tempfile import tempfile
+from Structure.tempfolder import tempfolder
+from Structure.folders import TEMP, DATA, MUSIC, PLAYLIST
+
+
+file: Structure/tempfile.py
+from folders import TEMP
+import pathlib
+import uuid
+
+class tempfile:
+    def __init__(self, delete:bool=True, suffix:str = ""):
+        self.delete = delete
+        self.suffix = suffix
+        self.name:pathlib.Path = None
+        self.f = None
+        self.open()
+    
+    def open(self):
+        if self.name is not None:
+            return self.name
+
+        self.name = TEMP / (uuid.uuid4().hex + self.suffix)
+        self.name.touch()
+        self.f = open(self.name, "wb")
+        return self.name
+    
+    def close(self):
+        if self.name is None:
+            return True
+        
+        self.f.close()
+        self.name.unlink()
+        self.name = None
+
+        return True
+
+    def write(self, buffer:bytearray | bytes):
+        if (self.f is not None) and (not self.f.closed):
+            return self.f.write(buffer)
+        return 0
+
+    def __enter__(self):
+        self.open()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.name is None:
+            return True
+        
+        if self.delete:
+            self.close()
+
+        return True
+
+
+file: Structure/tempfolder.py
+from folders import TEMP
+import uuid
+import pathlib
+import shutil
+
+class tempfolder:
+    def __init__(self, delete:bool=True):
+        self.delete = delete
+        self.name:pathlib.Path = None
+        self.open()
+    
+    def open(self):
+        if self.name is not None:
+            return self.name
+
+        self.name = TEMP / uuid.uuid4().hex
+        self.name.mkdir()
+        return self.name
+
+    def __enter__(self):
+        self.open()
+        return self
+    
+    def __exit__(self, *args):
+        if self.name is None:
+            return True
+        
+        if self.delete:
+            shutil.rmtree(self.name)
+            self.name = None
+
+        return True
+
+
+
+file: Structure/folders.py
+import pathlib
+
+FOLDER = pathlib.Path(__file__).parent.parent.parent
+DATA = FOLDER / "data"
+TEMP = FOLDER / "temp"
+MUSIC = FOLDER / "music"
+PLAYLIST = FOLDER / "playlists"
+
+
+file: Structure/kawaimusic.py
+import core.abstract_API.musicfileAPI as API
+
+class kawaimusicCompiler(API.musicfileCompilerAPI):
+    _suffix = "kawaimusic"
+
+class kawaimusic(API.musicfileAPI):
+    _compiler = kawaimusicCompiler
+
+
+
+
+file: abstract_API/playlistParserAPI.py
+from .urlCollectionAPI import urlCollectionAPI
+import abc
+
+
+class playlistParserAPI(abc.ABC):
+    _manager = None
+    def __init__(self, url:str):
+        self.url = url
+        self._video_urls: urlCollectionAPI = None
+    
+
+    @abc.abstractmethod
+    def parse(self) -> urlCollectionAPI:
+        pass
+
+    @property
+    def video_urls(self) -> urlCollectionAPI:
+        if self._video_urls is None:
+            self._video_urls = self.parse()
+        return self._video_urls
+
+    def __getitem__(self, index) -> urlCollectionAPI:
+        return self.video_urls[index]        
+
+
+
+file: abstract_API/urlCollectionAPI.py
+import abc
+import pathlib
+import core.Structure as Structure
+import asyncio
+
+class urlCollectionAPI(abc.ABC):
+    _manager = None
+    semaphore = asyncio.Semaphore(5)
+
+    def __init__(self, *urls:str):
+        self.urls = urls
+    
+
+    def __getitem__(self, index) -> "urlCollectionAPI":
+        return self.__class__(self.urls[index])
+
+
+    async def download(self, path:pathlib.Path = Structure.MUSIC, download_audio:bool = True):
+        await asyncio.gather(*(self._manager.urlDownloadManager(url).download(path, download_audio)
+                            for url in self.urls))
+
+
+
+
+file: abstract_API/urlDownloadAPI.py
+import concurrent
+import Structure
+import asyncio
+import pathlib
+import uuid
+import abc
+
+
+class urlDownloadAPI(abc.ABC):
+    _manager = None
+    def __init__(self, url:str):
+        self.url = url
+        self.uuid = uuid.uuid4()
+
+        self.audiodir = Structure.tempfolder(False).name
+        self.thumbnaildir = Structure.tempfolder(False).name
+        
+        self._metadata:None | Structure.video_metadata = None
+
+        self.semaphore = self._manager.urlCollecitonManager.semaphore
+
+
+    @abc.abstractmethod
+    def get_thumbnail(self):
+        pass
+
+    @abc.abstractmethod
+    def get_audio(self):
+        pass
+
+    @abc.abstractmethod
+    def get_metadata(self):
+        pass
+
+    def get_async_data(self, download_audio:bool = True):
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            if download_audio:
+                executor.submit(self.get_audio)
+            executor.submit(self.get_thumbnail)
+            executor.submit(self.metadata)
+
+    async def download(self, path:pathlib.Path = Structure.MUSIC, download_audio:bool = True):
+        async with self.semaphore:
+            await self._download(path, download_audio)
+
+
+    def _download(self, path:pathlib.Path = Structure.MUSIC, download_audio:bool = True):
+        self.get_async_data(download_audio)
+        loop = asyncio.get_running_loop()
+        if self._metadata is None:
+            loop.run_in_executor(None, self.get_metadata)
+        if len(list(self.thumbnaildir.iterdir())) < 1:
+            loop.run_in_executor(None, self.get_thumbnail)
+        if len(list(self.audiodir.iterdir())) < 1 and download_audio:
+            loop.run_in_executor(None, self.get_audio)
+        
+        audio = None
+        if download_audio:
+            audio = list(self.audiodir.iterdir())[0]
+        thumbnail = list(self.thumbnaildir.iterdir())[0]
+
+        return self._manager.musicfileManager.compiler(self.metadata, thumbnail, audio, path)
+        
+    @property
+    def metadata(self):
+        if self._metadata is not None:
+            return self._metadata
+        else:
+            return self.get_metadata()
+
+
+
+file: abstract_API/__init__.py
+from abstract_API.playlistParserAPI import playlistParserAPI
+from abstract_API.urlCollectionAPI import urlCollectionAPI
+from abstract_API.urlDownloadAPI import urlDownloadAPI
+
+
+
+file: abstract_API/generalManagerAPI.py
+from .playlistParserAPI import playlistParserAPI
+from .urlCollectionAPI import urlCollectionAPI
+from .urlDownloadAPI import urlDownloadAPI
+from .musicfileAPI import musicfileAPI
+import asyncio
+import pathlib
+import abc
+
+
+
+
+
+class generalManager(abc.ABC):
+    def __init__(self, playlistManager:type[playlistParserAPI],
+                 urlCollectionManager:type[urlCollectionAPI],
+                 urlDownloadManager:type[urlDownloadAPI],
+                 musicfileManager:type[musicfileAPI]):
+        self.playlistManager = playlistManager
+        self.urlCollecitonManager = urlCollectionManager
+        self.urlDownloadManager = urlDownloadManager
+        self.musicfileManager = musicfileManager
+
+        
+        self.playlistManager._manager = self
+        self.urlCollecitonManager._manager = self
+        self.urlDownloadManager._manager = self
+        self.musicfileManager._manager = self
+
+
+    def download(self, *urls, collection_slicer = None):
+        state = "unknown"
+        item = urls
+
+        if len(item) < 2 and "list=" in item[0]:
+            item = self.playlistManager(item)
+            state = "playlist"
+        elif len(urls) > 1:
+            item = self.urlCollecitonManager(*item)
+            state = "urlcollection"
+        else:
+            item = self.urlDownloadManager(item)
+            state = "single"
+        
+
+        if state == "playlist":
+            item = item.parse()
+            state = "urlcollection"
+        if state == "urlcollection":
+            if collection_slicer is not None:
+                item = item[collection_slicer]
+            asyncio.run(item.download())
+        elif state == "single":
+            asyncio.run(item.download())
+
+
+    @abc.abstractmethod
+    def load(self, path:pathlib.Path):
+        pass
+
+
+
+file: abstract_API/musicfileAPI.py
+import core.Structure as Structure
+import zipfile
+import pathlib
+import shutil
+import json
+import abc
+
+#TODO:compile olduğu zaman veri tabanına eklenmeli
+class musicfileCompilerAPI(abc.ABC):
+    _suffix = "musicfile"
+    _audio_name = "audio"
+    _thumbnail_name = "thumbnail"
+    def __init__(self, metadata:Structure.video_metadata,  thumbnail_path:pathlib.Path, audio_path:pathlib.Path=None, result_path:pathlib.Path = Structure.MUSIC):
+        self.metadata = metadata
+        self.thumbnail_path = thumbnail_path
+        self.audio_path = audio_path
+        self.result_path = result_path
+    
+    def compile(self):
+        with zipfile.ZipFile(self.result_path / (self.metadata.title + f".{self.__class__._suffix}"), "w") as archive:
+            if self.audio_path is not None:
+                archive.write(self.audio_path, arcname=self.__class__._audio_name)
+            archive.write(self.thumbnail_path, arcname=self.__class__._thumbnail_name)
+            archive.writestr("metadata.json", json.dumps(self.metadata.get_dict(), indent=4))
+            self.archive_path = archive.filename
+            
+        shutil.rmtree(self.thumbnail_path)
+        shutil.rmtree(self.audio_path)
+        return self.archive_path
+
+class musicfileAPI(abc.ABC):
+    _manager = None
+    _compiler = musicfileCompilerAPI
+    
+    @classmethod
+    def compile(cls, metadata:Structure.video_metadata,  thumbnail_path:pathlib.Path, audio_path:pathlib.Path=None, result_path:pathlib.Path = Structure.MUSIC):
+        return cls(cls._compiler(metadata, thumbnail_path, audio_path, result_path).compile())
+
+    def __init__(self, musicfile_path:pathlib.Path):
+        self.path = musicfile_path
+
+        self.audio_path:str = None
+        self.thumbanil_path:str = None 
+
+
+    def __del__(self):
+        if self.audio_path is not None and (path:=pathlib.Path(self.audio_path)).exists():
+            path.unlink()
+        if self.thumbanil_path is not None and (path:=pathlib.Path(self.thumbanil_path)).exists():
+            path.unlink()
+
+    def _load(self, item_name:str):
+        with zipfile.ZipFile(self.path, "r") as zf:
+            with zf.open(item_name) as item:
+                with Structure.tempfile(False) as tmp:
+                    tmp.write(item.read())
+                    return tmp.name
+
+    def load_thumbnail(self):
+        if self.thumbanil_path is None:
+            self.thumbanil_path = self._load(self._compiler._thumbnail_name)
+        return self.thumbanil_path
+    
+    def load_audio(self):
+        if self.audio_path is None:
+            self.audio_path = self._load(self._compiler._audio_name)
+        return self.audio_path
+
+
+
+
+
+
+file: Youtube_API/dictionary.py
+
+class sub_api:
+    skip_download = {"skip_download": True}
+    extract_flat = {"extract_flat": True}
+    quiet = {'quiet': True, 'no_warnings': True}
+    outtmpl = {'outtmpl': '%(title)s.%(ext)s'}
+    write_thumbnail = {'writethumbnail': True}
+    opus32 = {'postprocessors': [{'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'opus','preferredquality': '32'}]}
+    opus_format = {'format': 'bestaudio[ext=opus]/bestaudio/best'}
+    simulate = {"simulate": True}
+    dump_single_json = {"dump_single_json": True}
+    playlist_reverse_false = {"extractor_args": {"youtube": ["playlist_reverse=false"]}}
+    force_generic_extractor = {"force_generic_extractor": False,}
+
+
+
+YT_AUDIO_API = {
+    **sub_api.opus_format,
+    **sub_api.opus32,
+    **sub_api.outtmpl,
+    **sub_api.quiet,
+}
+
+YT_THUMBNAIL_API = {
+    **sub_api.write_thumbnail,
+    **sub_api.skip_download,
+    **sub_api.quiet,
+    **sub_api.outtmpl,
+}
+
+YT_INFO_API = {
+    **sub_api.outtmpl,
+    **sub_api.skip_download,
+    **sub_api.quiet,
+}
+
+YT_PLAYLIST_PARSER_API = {
+    **sub_api.force_generic_extractor,
+    **sub_api.playlist_reverse_false,
+    **sub_api.dump_single_json,
+    **sub_api.simulate,
+    **sub_api.skip_download,
+    **sub_api.extract_flat,
+    **sub_api.quiet,
+}
+
+
+
+
+file: Youtube_API/urlColleciton.py
+from .urlDownload import YT_urlDownload
+import core.abstract_API as API
+import core.Structure as Structure
+import json
+import uuid
+
+
+#TODO: download metodundan Playlist çıktısı alınmalı ve veri tabanı etkileşimleri
+class YT_urlCollection(API.urlCollectionAPI):
+    def download(self):
+        uuids = {}
+        for url in self.urls:
+            YT = YT_urlDownload(url)
+            YT.export()
+            uuids[YT.uuid.hex] = YT.archive_path
+        json.dump(uuids, open(Structure.PLAYLIST / uuid.uuid4().hex, "w", encoding="utf-8"))
+
+
+
+file: Youtube_API/playlistParser.py
+from .urlColleciton import YT_urlCollection
+import core.abstract_API as API
+import dictionary as yt_api
+import yt_dlp
+
+
+class YT_playlistParser(API.playlistParserAPI):
+    def parse(self) -> YT_urlCollection:
+        with yt_dlp.YoutubeDL(yt_api.YT_PLAYLIST_PARSER_API) as ydl:
+            info = ydl.extract_info(self.url, download=False)
+
+            return YT_urlCollection(*[entry["url"] for entry in info["entries"]])
+
+
+
+file: Youtube_API/urlDownload.py
+import core.abstract_API as API
+import core.Structure as Structure
+from . import dictionary as yt_api
+import yt_dlp
+
+
+class YT_urlDownload(API.urlDownloadAPI):
+    def get_metadata(self) -> Structure.video_metadata:
+        with yt_dlp.YoutubeDL(yt_api.YT_INFO_API) as ydl:
+            info = ydl.extract_info(self.url, download = False)
+
+            metadata = {
+                "title": info.get("title"),
+                "uploader": info.get("uploader"),
+                "upload_date": info.get("upload_date"),
+                "track": info.get("track"),
+                "artist": info.get("artist"),
+                "url": self.url,
+                "uuid": self.uuid.hex
+            }
+
+            self._metadata = Structure.video_metadata(**metadata)
+            return self._metadata
+
+    def get_thumbnail(self):
+        api = yt_api.YT_THUMBNAIL_API.copy()
+        api["outtmpl"] = str(self.thumbnaildir / api["outtmpl"])
+
+        with yt_dlp.YoutubeDL(api) as ydl:
+            ydl.download([self.url])
+
+    def get_audio(self):
+        api = yt_api.YT_AUDIO_API.copy()
+        api["outtmpl"] = str(self.audiodir / api["outtmpl"])
+
+        with yt_dlp.YoutubeDL(api) as ydl:
+            ydl.download([self.url])
+
+
+
+file: Youtube_API/__init__.py
+from dictionary import *
+from playlistParser import YT_playlistParser
+from urlColleciton import YT_urlCollection
+from urlDownload import YT_urlDownload
+
+
+
